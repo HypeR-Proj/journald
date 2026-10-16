@@ -118,9 +118,13 @@ mod tests;
 #[derive(Default)]
 pub struct LineBuffer {
     pending: Vec<u8>,
+    last_input_ns: u64,
 }
 impl LineBuffer {
-    pub fn push(&mut self, bytes: &[u8], mut emit: impl FnMut(&[u8], bool)) {
+    pub fn push(&mut self, bytes: &[u8], now: u64, mut emit: impl FnMut(&[u8], bool)) {
+        if !bytes.is_empty() {
+            self.last_input_ns = now;
+        }
         for &b in bytes {
             if b == b'\n' {
                 emit(&self.pending, false);
@@ -132,6 +136,13 @@ impl LineBuffer {
                     self.pending.clear();
                 }
             }
+        }
+    }
+    /// Give each source time to complete a line across separate channel writes.
+    /// A global periodic flush can split a fragment immediately after receipt.
+    pub fn flush_idle(&mut self, now: u64, emit: impl FnMut(&[u8], bool)) {
+        if now.saturating_sub(self.last_input_ns) >= 100_000_000 {
+            self.flush(emit);
         }
     }
     pub fn flush(&mut self, mut emit: impl FnMut(&[u8], bool)) {

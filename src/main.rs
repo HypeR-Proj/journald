@@ -159,7 +159,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     hyper_component::notify(&startup, &hyper_component::Notification::Ready)?;
     let mut inputs: Vec<Input> = Vec::new();
     let mut scratch = vec![0; hyper_os::channel::MAX_MESSAGE_BYTES];
-    let mut last_flush = 0;
     loop {
         while reader.as_byte_channel().try_receive(&mut scratch).is_ok() {}
         for input in rx.try_iter() {
@@ -170,10 +169,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let now = hyper_os::time::monotonic_now()?.as_nanoseconds();
-        let flush_partial = now.saturating_sub(last_flush) >= 100_000_000;
-        if flush_partial {
-            last_flush = now;
-        }
         inputs.retain_mut(|input| {
             let mut closed = false;
             // Per-source budget prevents one producer from starving siblings.
@@ -181,7 +176,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 match input.channel.as_byte_channel().try_receive(&mut scratch) {
                     Ok(n) => {
                         if let Ok(mut j) = journal.lock() {
-                            input.lines.push(&scratch[..n], |text, part| {
+                            input.lines.push(&scratch[..n], now, |text, part| {
                                 record(&mut j, mirror.as_ref(), &input.source, text, part, now)
                             });
                         }
@@ -193,13 +188,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            // Flush partial lines periodically so unterminated diagnostics are visible.
-            if (closed || flush_partial)
-                && let Ok(mut j) = journal.lock()
-            {
-                input.lines.flush(|text, part| {
+            // Only idle sources flush partial lines. A busy source may still
+            // have a line's remaining fragments queued after its read budget.
+            if let Ok(mut j) = journal.lock() {
+                let emit = |text: &[u8], part| {
                     record(&mut j, mirror.as_ref(), &input.source, text, part, now)
-                });
+                };
+                if closed {
+                    input.lines.flush(emit);
+                } else {
+                    input.lines.flush_idle(now, emit);
+                }
             }
             !closed
         });
