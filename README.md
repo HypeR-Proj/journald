@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # journald
 
 Native log ingestion and bounded query service. The journal owns retained records
-while admission workers deliver log streams and independent query sessions.
+while admission workers deliver log streams and query endpoints.
 
 ## Workspace tests
 
@@ -21,7 +21,20 @@ Edit this repository and prepare the workspace again before building.
 
 ## Listener failure policy
 
-Log, query-session and outgoing-protocol admissions discard malformed requests
+Log, query-request and outgoing-protocol admissions discard malformed requests
 and matched transfer rejections. Endpoint closure ends the affected worker;
 unexpected local receive failures are reported and stop that listener instead of
-spinning. Existing log inputs and unrelated query sessions retain their owners.
+spinning. Existing log inputs and delegated query endpoints retain their owners.
+
+## Query resources
+
+Eight fixed workers serve the shared query endpoint. Each request supplies its
+own reply channel; retention is unlocked before the bounded reply operation.
+An idle client retains only its delegated capability, not a journal thread or
+session slot. Long-lived shell delegation remains valid after idle periods.
+
+A routed `query` connection transfers the request endpoint using
+`hyper_journal::open_query`. At most eight incomplete endpoint handoffs are
+retained, each with an absolute five-second deadline. Excess connections close;
+expired or closed peers release their temporary handles and workers. These
+bounds contain aggregate resource usage, not per-client fairness.
