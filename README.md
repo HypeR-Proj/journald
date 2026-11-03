@@ -38,3 +38,12 @@ A routed `query` connection transfers the request endpoint using
 retained, each with an absolute five-second deadline. Excess connections close;
 expired or closed peers release their temporary handles and workers. These
 bounds contain aggregate resource usage, not per-client fairness.
+
+## Registration validation
+
+Source registration uses `hyper_journal::registration` for the receive-buffer
+limit and decoding. Names contain 1–255 UTF-8 bytes with no Unicode control
+characters; the complete frame is limited to 512 bytes, including the prefix
+and JSON escaping. Invalid frames are rejected before publishing the source,
+with received capability owners released. Structured `LOG2` and raw `LOGS`
+registrations share the name contract.
