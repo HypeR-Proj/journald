@@ -3,6 +3,8 @@
 
 //! Bounded journal ingestion; console and query I/O run outside the retention lock.
 
+mod query;
+
 use hyper_journal::{Source, Stream};
 use hyper_journald::{Journal, LineBatch, LineBuffer};
 use hyper_os::{Error, Status, capability_channel::*, handle::*, wait::*};
@@ -54,66 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mirror = startup.take_optional(hyper_journal::MIRROR)?;
     let journal = Arc::new(Mutex::new(Journal::default()));
     let outgoing = CapabilityChannel::from_handle(startup.take(hyper_component::OUTGOING)?);
-    let shared = journal.clone();
-    std::thread::Builder::new()
-        .name("journal-query-admit".into())
-        .spawn(move || {
-            let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            loop {
-                let (name, query) = match hyper_component::connection::accept(
-                    &outgoing,
-                    hyper_os::DEADLINE_INFINITE,
-                ) {
-                    Ok(hyper_service_ipc::Admission::Accepted(c)) => c,
-                    Err(Error::Status(Status::PEER_CLOSED)) => return,
-                    Ok(hyper_service_ipc::Admission::Rejected(_)) => continue,
-                    Err(error) => {
-                        eprintln!("journal query admission listener stopped: {error}");
-                        return;
-                    }
-                };
-                if name != "query" || active.load(std::sync::atomic::Ordering::Acquire) >= 8 {
-                    continue;
-                }
-                active.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                let shared = shared.clone();
-                let count = active.clone();
-                if std::thread::Builder::new()
-                    .name("journal-query".into())
-                    .spawn(move || {
-                        struct Session(Arc<std::sync::atomic::AtomicUsize>);
-                        impl Drop for Session {
-                            fn drop(&mut self) {
-                                self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                            }
-                        }
-                        let _session = Session(count);
-                        loop {
-                            let call = match hyper_service_ipc::receive::<hyper_journal::Query>(
-                                &query,
-                                hyper_os::DEADLINE_INFINITE,
-                            ) {
-                                Ok(hyper_service_ipc::Admission::Accepted(call)) => call,
-                                Err(Error::Status(Status::PEER_CLOSED)) => return,
-                                Ok(hyper_service_ipc::Admission::Rejected(_)) => continue,
-                                Err(error) => {
-                                    eprintln!("journal query listener stopped: {error}");
-                                    return;
-                                }
-                            };
-                            let snapshot = match shared.lock() {
-                                Ok(j) => j.snapshot(&call.request),
-                                Err(_) => return,
-                            };
-                            let _ = call.respond(&snapshot.into_page());
-                        }
-                    })
-                    .is_err()
-                {
-                    active.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                }
-            }
-        })?;
+    let _queries = query::Service::start(outgoing, journal.clone())?;
     hyper_component::connection::publish(startup.borrow(hyper_component::CONNECTOR)?, "query")?;
     let (tx, rx) = mpsc::sync_channel(ADMISSION_BUDGET);
     let (wake, reader) = hyper_os::channel::create_pair()?;
