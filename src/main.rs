@@ -64,9 +64,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &outgoing,
                     hyper_os::DEADLINE_INFINITE,
                 ) {
-                    Ok(c) => c,
+                    Ok(hyper_service_ipc::Admission::Accepted(c)) => c,
                     Err(Error::Status(Status::PEER_CLOSED)) => return,
-                    Err(_) => continue,
+                    Ok(hyper_service_ipc::Admission::Rejected(_)) => continue,
+                    Err(error) => {
+                        eprintln!("journal query admission listener stopped: {error}");
+                        return;
+                    }
                 };
                 if name != "query" || active.load(std::sync::atomic::Ordering::Acquire) >= 8 {
                     continue;
@@ -89,9 +93,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 &query,
                                 hyper_os::DEADLINE_INFINITE,
                             ) {
-                                Ok(call) => call,
+                                Ok(hyper_service_ipc::Admission::Accepted(call)) => call,
                                 Err(Error::Status(Status::PEER_CLOSED)) => return,
-                                Err(_) => continue,
+                                Ok(hyper_service_ipc::Admission::Rejected(_)) => continue,
+                                Err(error) => {
+                                    eprintln!("journal query listener stopped: {error}");
+                                    return;
+                                }
                             };
                             let snapshot = match shared.lock() {
                                 Ok(j) => j.snapshot(&call.request),
@@ -121,7 +129,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     match listener.receive(hyper_os::DEADLINE_INFINITE, &mut bytes, &mut slots) {
                         Ok(m) => m,
                         Err(Error::Status(Status::PEER_CLOSED)) => return,
-                        Err(_) => continue,
+                        Err(Error::ReceiveRejected(_)) => continue,
+                        Err(error) => {
+                            eprintln!("journal log listener stopped: {error}");
+                            return;
+                        }
                     };
                 if message.capability_count() != 1 || message.bytes().len() < 5 {
                     continue;
@@ -145,8 +157,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }) else {
                     continue;
                 };
-                let Ok(Some(channel)) = slots[0].take() else {
-                    continue;
+                let channel = match slots[0].take() {
+                    Ok(Some(channel)) => channel,
+                    result => {
+                        let error = result.err().unwrap_or(Error::MissingHandle);
+                        eprintln!("journal log listener lost its received owner: {error}");
+                        return;
+                    }
                 };
                 if tx
                     .send(Input {
