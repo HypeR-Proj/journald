@@ -5,7 +5,7 @@
 
 mod query;
 
-use hyper_journal::{Source, Stream};
+use hyper_journal::{Source, registration};
 use hyper_journald::{Journal, LineBatch, LineBuffer};
 use hyper_os::{Error, Status, capability_channel::*, handle::*, wait::*};
 use std::{
@@ -64,7 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .name("journal-admit".into())
         .spawn(move || {
             loop {
-                let mut bytes = [MaybeUninit::uninit(); 512];
+                let mut bytes = [MaybeUninit::uninit(); registration::MAX_BYTES];
                 let mut slots = [CapabilityReceiveSlot::new::<ByteChannelObject>(
                     hyper_journal::SOURCE_RIGHTS,
                 )];
@@ -78,26 +78,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
-                if message.capability_count() != 1 || message.bytes().len() < 5 {
+                if message.capability_count() != 1 {
                     continue;
                 }
-                let b = message.bytes();
-                let source = if &b[..4] == b"LOG2" {
-                    serde_json::from_slice::<Source>(&b[4..]).ok()
-                } else if &b[..4] == b"LOGS" {
-                    std::str::from_utf8(&b[4..]).ok().map(|s| Source {
-                        component: s.into(),
-                        generation: 0,
-                        stream: Stream::Log,
-                    })
-                } else {
-                    None
-                };
-                let Some(source) = source.filter(|s| {
-                    !s.component.is_empty()
-                        && s.component.len() <= 255
-                        && !s.component.chars().any(char::is_control)
-                }) else {
+                let Ok(source) = registration::decode(message.bytes()) else {
                     continue;
                 };
                 let channel = match slots[0].take() {
