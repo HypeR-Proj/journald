@@ -18,6 +18,7 @@ use std::time::Duration;
 const WORKERS: usize = 8;
 const HANDOFFS: usize = 8;
 const SLICE: Duration = Duration::from_millis(250);
+const REPLY_BUDGET: Duration = Duration::from_secs(5);
 
 pub(super) struct Service {
     stop: Arc<AtomicBool>,
@@ -71,6 +72,7 @@ impl Drop for Service {
 }
 
 fn serve(requests: &CapabilityChannel, journal: &Mutex<Journal>, stop: &AtomicBool) -> Result<()> {
+    let mut reply_failures = 0_u64;
     while !stop.load(Ordering::Acquire) {
         let until = hyper_os::time::deadline_after(SLICE)?.as_raw();
         let call = match hyper_service_ipc::receive::<hyper_journal::Query>(requests, until) {
@@ -85,7 +87,15 @@ fn serve(requests: &CapabilityChannel, journal: &Mutex<Journal>, stop: &AtomicBo
             .snapshot(&call.request);
         // Retention ownership ends before bounded reply I/O. Every request
         // carries its own reply channel; an idle client owns no server worker.
-        let _ = call.respond(&snapshot.into_page());
+        let until = hyper_os::time::deadline_after(REPLY_BUDGET)?.as_raw();
+        if let Err(error) = call.respond_until(&snapshot.into_page(), until)
+            && !error.is_reply_abandoned()
+        {
+            reply_failures = reply_failures.saturating_add(1);
+            if reply_failures.is_power_of_two() {
+                eprintln!("journal query reply failure #{reply_failures}: {error}");
+            }
+        }
     }
     Ok(())
 }
